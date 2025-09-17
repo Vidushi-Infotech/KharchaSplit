@@ -9,8 +9,11 @@ import {
   ActivityIndicator,
   ScrollView,
   StatusBar,
-  Animated,
+  Image,
+  ActionSheetIOS,
+  Platform,
 } from 'react-native';
+import { launchImageLibrary, launchCamera, ImagePickerResponse, MediaType } from 'react-native-image-picker';
 import { colors } from '../utils/colors';
 
 interface ProfileSetupScreenProps {
@@ -29,6 +32,7 @@ export const ProfileSetupScreen: React.FC<ProfileSetupScreenProps> = ({
   const { phoneNumber } = route.params;
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [profileImage, setProfileImage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSaveProfile = async () => {
@@ -47,11 +51,24 @@ export const ProfileSetupScreen: React.FC<ProfileSetupScreenProps> = ({
       const { firebaseService } = await import('../services/firebaseService');
       const { userStorage } = await import('../services/userStorage');
       
-      const userProfile = await firebaseService.createUser({
+      // Prepare user data, only including defined values
+      const userData: any = {
         phoneNumber,
         name: name.trim(),
-        email: email.trim() || undefined,
-      });
+      };
+
+      // Only add email if it has a value
+      if (email.trim()) {
+        userData.email = email.trim();
+      }
+
+      // Only add profileImage if it exists
+      if (profileImage) {
+        userData.profileImage = profileImage;
+        console.log('Profile image size:', profileImage.length, 'characters');
+      }
+
+      const userProfile = await firebaseService.createUser(userData);
 
       // Save user data locally for quick access
       await userStorage.saveUser(userProfile);
@@ -78,6 +95,77 @@ export const ProfileSetupScreen: React.FC<ProfileSetupScreenProps> = ({
     return emailRegex.test(email);
   };
 
+  const convertImageToBase64 = (imageUri: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      fetch(imageUri)
+        .then(response => response.blob())
+        .then(blob => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = reader.result as string;
+            resolve(base64);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        })
+        .catch(reject);
+    });
+  };
+
+  const selectImage = () => {
+    const options = {
+      mediaType: 'photo' as MediaType,
+      quality: 0.8 as any,
+      maxWidth: 500,
+      maxHeight: 500,
+    };
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Cancel', 'Take Photo', 'Choose from Library'],
+          cancelButtonIndex: 0,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 1) {
+            launchCamera(options, handleImageResponse);
+          } else if (buttonIndex === 2) {
+            launchImageLibrary(options, handleImageResponse);
+          }
+        }
+      );
+    } else {
+      Alert.alert(
+        'Select Image',
+        'Choose how you want to select an image',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Take Photo', onPress: () => launchCamera(options, handleImageResponse) },
+          { text: 'Choose from Library', onPress: () => launchImageLibrary(options, handleImageResponse) },
+        ]
+      );
+    }
+  };
+
+  const handleImageResponse = async (response: ImagePickerResponse) => {
+    if (response.didCancel || response.errorMessage) {
+      return;
+    }
+
+    if (response.assets && response.assets[0]) {
+      const asset = response.assets[0];
+      try {
+        if (asset.uri) {
+          const base64Image = await convertImageToBase64(asset.uri);
+          setProfileImage(base64Image);
+        }
+      } catch (error) {
+        Alert.alert('Error', 'Failed to process image. Please try again.');
+        console.error('Image processing error:', error);
+      }
+    }
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
@@ -89,9 +177,19 @@ export const ProfileSetupScreen: React.FC<ProfileSetupScreenProps> = ({
       >
         {/* Header */}
         <View style={styles.header}>
-          <View style={styles.iconContainer}>
-            <Text style={styles.profileIcon}>👤</Text>
-          </View>
+          <TouchableOpacity style={styles.profileImageContainer} onPress={selectImage}>
+            {profileImage ? (
+              <Image source={{ uri: profileImage }} style={styles.profileImage} />
+            ) : (
+              <View style={styles.profilePlaceholder}>
+                <Text style={styles.profileIcon}>👤</Text>
+                <Text style={styles.addPhotoText}>Add Photo</Text>
+              </View>
+            )}
+            <View style={styles.cameraIcon}>
+              <Text style={styles.cameraIconText}>📷</Text>
+            </View>
+          </TouchableOpacity>
           <Text style={styles.title}>Setup Your Profile</Text>
           <Text style={styles.subtitle}>Let's get to know you better</Text>
         </View>
@@ -184,14 +282,26 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
     alignItems: 'center',
   },
-  iconContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+  profileImageContainer: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    marginBottom: 24,
+    position: 'relative',
+  },
+  profileImage: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: colors.cardBackground,
+  },
+  profilePlaceholder: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
     backgroundColor: colors.cardBackground,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 24,
     shadowColor: colors.activeIcon,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.2,
@@ -200,6 +310,31 @@ const styles = StyleSheet.create({
   },
   profileIcon: {
     fontSize: 32,
+    marginBottom: 4,
+  },
+  addPhotoText: {
+    fontSize: 12,
+    color: colors.secondaryText,
+    fontWeight: '500',
+  },
+  cameraIcon: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.primaryButton,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: colors.primaryButton,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  cameraIconText: {
+    fontSize: 16,
   },
   title: {
     fontSize: 32,

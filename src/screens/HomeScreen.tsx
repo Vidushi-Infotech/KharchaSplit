@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,12 +8,16 @@ import {
   StatusBar,
 } from 'react-native';
 import { colors } from '../utils/colors';
+import { ProfileImage } from '../components/ProfileImage';
+import { User } from '../types';
 
 interface HomeScreenProps {
   navigation: any;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
   const handleCreateGroup = () => {
     // Navigate to create group screen
     console.log('Create group');
@@ -29,15 +33,48 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
     console.log('View profile');
   };
 
+  const loadUserProfile = async () => {
+    try {
+      const { userStorage } = await import('../services/userStorage');
+      const userData = await userStorage.getUser();
+      if (userData) {
+        setUser(userData);
+        console.log('User profile loaded:', userData.name, userData.profileImage ? 'with image' : 'without image');
+      } else {
+        console.log('No user profile found - please complete profile setup');
+      }
+    } catch (error) {
+      console.error('Error loading user profile:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadUserProfile();
+  }, []);
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={colors.background} />
       
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <View style={styles.welcomeContainer}>
-            <Text style={styles.welcomeText}>Welcome back! 👋</Text>
-            <Text style={styles.title}>KharchaSplit</Text>
+          <View style={styles.profileSection}>
+            <TouchableOpacity onPress={handleViewProfile}>
+              <ProfileImage
+                profileImage={user?.profileImage}
+                size={60}
+                showBorder={true}
+                style={styles.profileImageStyle}
+              />
+            </TouchableOpacity>
+            <View style={styles.welcomeContainer}>
+              <Text style={styles.welcomeText}>
+                Welcome back{user?.name ? `, ${user.name.split(' ')[0]}` : ''}! 👋
+              </Text>
+              <Text style={styles.title}>KharchaSplit</Text>
+            </View>
           </View>
           <Text style={styles.subtitle}>Manage your group expenses seamlessly</Text>
         </View>
@@ -112,8 +149,16 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingBottom: 32,
   },
-  welcomeContainer: {
+  profileSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 16,
+  },
+  profileImageStyle: {
+    marginRight: 16,
+  },
+  welcomeContainer: {
+    flex: 1,
   },
   welcomeText: {
     fontSize: 16,

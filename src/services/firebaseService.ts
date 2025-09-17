@@ -5,6 +5,7 @@ export interface UserProfile {
   phoneNumber: string;
   name: string;
   email?: string;
+  profileImage?: string; // Base64 encoded image
   createdAt: string;
   updatedAt: string;
   isActive: boolean;
@@ -14,6 +15,7 @@ export interface CreateUserProfile {
   phoneNumber: string;
   name: string;
   email?: string;
+  profileImage?: string; // Base64 encoded image
 }
 
 class FirebaseService {
@@ -22,8 +24,14 @@ class FirebaseService {
   async createUser(userData: CreateUserProfile): Promise<UserProfile> {
     try {
       const timestamp = new Date().toISOString();
+
+      // Filter out undefined values to avoid Firestore errors
+      const cleanUserData = Object.fromEntries(
+        Object.entries(userData).filter(([_, value]) => value !== undefined)
+      );
+
       const userDoc = {
-        ...userData,
+        ...cleanUserData,
         createdAt: timestamp,
         updatedAt: timestamp,
         isActive: true,
@@ -38,7 +46,7 @@ class FirebaseService {
 
       console.log('User created successfully:', userProfile.id);
       return userProfile;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error creating user:', error);
       if (error.code === 'firestore/permission-denied') {
         throw new Error('Permission denied. Please check Firestore security rules.');

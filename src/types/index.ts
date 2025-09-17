@@ -3,6 +3,7 @@ export interface User {
   phoneNumber: string;
   name: string;
   email?: string;
+  profileImage?: string; // Base64 encoded image
   createdAt: string;
   updatedAt: string;
   isActive: boolean;
