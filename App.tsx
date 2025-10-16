@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, ActivityIndicator } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ThemeProvider, useTheme } from './src/context/ThemeContext';
@@ -136,6 +138,15 @@ const AppContent: React.FC = () => {
 
 const App: React.FC = () => {
   return (
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <BiometricProvider>
+            <AppContent />
+          </BiometricProvider>
+        </AuthProvider>
+      </ThemeProvider>
+    </SafeAreaProvider>
     <SafeAreaProvider>
       <ThemeProvider>
         <AuthProvider>

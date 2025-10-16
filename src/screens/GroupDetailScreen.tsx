@@ -1,5 +1,6 @@
 import React, {useEffect, useState, useCallback} from 'react'; // Added useCallback
 import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -22,9 +23,12 @@ import MaterialIcons from 'react-native-vector-icons/MaterialIcons';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { ensureDataUri } from '../utils/imageUtils';
+import { useAuth } from '../context/AuthContext';
+import { ensureDataUri } from '../utils/imageUtils';
 // --- RESPONSIVE ---
 import {SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import { typography } from '../utils/typography'; // Assuming this path is correct
+import { ExpensesSkeleton, BalancesSkeleton, SettlementSkeleton } from '../components/SkeletonLoader';
 import { ExpensesSkeleton, BalancesSkeleton, SettlementSkeleton } from '../components/SkeletonLoader';
 
 // --- ANIMATION ---
@@ -40,6 +44,22 @@ if (
 type Group = any;
 type Member = any;
 type Expense = any;
+
+interface Settlement {
+  id?: string;
+  groupId: string;
+  fromUserId: string;
+  fromUserName: string;
+  toUserId: string;
+  toUserName: string;
+  amount: number;
+  status: 'unpaid' | 'pending' | 'paid';
+  createdAt: string;
+  updatedAt: string;
+  paidAt?: string;
+  confirmedAt?: string;
+  paymentNote?: string;
+}
 
 interface Settlement {
   id?: string;
@@ -74,7 +94,9 @@ interface Props {
 export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
   const { colors } = useTheme();
   const { user } = useAuth();
+  const { user } = useAuth();
   const {group} = route.params;
+  const currentUserId = user?.id || route.params?.currentUserId || null;
   const currentUserId = user?.id || route.params?.currentUserId || null;
 
   // --- RESPONSIVE ---
@@ -125,9 +147,40 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
 
   type TabId = typeof TAB_CONFIG[number]['id'];
 
+  // Dynamic tab configuration
+  const TAB_CONFIG = [
+    {
+      id: 'expenses',
+      label: 'Expenses',
+      icon: 'receipt-outline',
+      activeIcon: 'receipt',
+    },
+    {
+      id: 'balances',
+      label: 'Balances', 
+      icon: 'wallet-outline',
+      activeIcon: 'wallet',
+    },
+    {
+      id: 'settlement',
+      label: 'Settlement',
+      icon: 'swap-horizontal-outline',
+      activeIcon: 'swap-horizontal',
+    },
+  ] as const;
+
+  type TabId = typeof TAB_CONFIG[number]['id'];
+
   // --- STATE ---
   const [activeTab, setActiveTab] = useState<TabId>('expenses');
+  const [activeTab, setActiveTab] = useState<TabId>('expenses');
   const [showGroupOptions, setShowGroupOptions] = useState(false);
+  const [currentGroup, setCurrentGroup] = useState(group); // Track current group data locally
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [groupMembers, setGroupMembers] = useState<Member[]>([]);
+  const [balances, setBalances] = useState<Record<string, {net: number}>>({});
+  const [settlements, setSettlements] = useState<any[]>([]);
+  const [firebaseSettlements, setFirebaseSettlements] = useState<Settlement[]>([]);
   const [currentGroup, setCurrentGroup] = useState(group); // Track current group data locally
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [groupMembers, setGroupMembers] = useState<Member[]>([]);
@@ -139,6 +192,7 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
   const [expandedUsers, setExpandedUsers] = useState<Record<string, boolean>>({});
   const [isGroupAdmin, setIsGroupAdmin] = useState(false);
   const [settlementLoading, setSettlementLoading] = useState(false);
+  const [settlementLoading, setSettlementLoading] = useState(false);
 
   
   // --- LOGIC (Wrapped in useCallback) ---
@@ -148,7 +202,12 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     if (!groupId) {
       return;
     }
+    const groupId = currentGroup?.id || group?.id;
+    if (!groupId) {
+      return;
+    }
     setLoading(true);
+    
     
     try {
       // Import Firebase service dynamically
@@ -258,10 +317,20 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
       setLoading(false);
     }
   }, []);
+  }, []);
 
+  // Load data once on mount
   // Load data once on mount
   useEffect(() => {
     loadGroupData();
+  }, []); // Only run once on mount
+
+  // Refresh data when screen comes into focus (e.g., returning from ManageGroup)
+  useFocusEffect(
+    useCallback(() => {
+      loadGroupData();
+    }, [])
+  );
   }, []); // Only run once on mount
 
   // Refresh data when screen comes into focus (e.g., returning from ManageGroup)
@@ -290,6 +359,140 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     navigation.navigate('ManageGroup', {group: groupWithoutBase64});
   }, [navigation, currentGroup]);
 
+  const handleCompleteGroup = useCallback(async () => {
+    try {
+      // Check if there are any pending settlements
+      const allSettlements = calculateOptimalSettlements(balances, groupMembers);
+      const pendingSettlements = allSettlements.length > 0;
+      
+      // Also check firebase settlements for pending status
+      const firebasePendingSettlements = firebaseSettlements.filter(s => s.status === 'pending' || s.status === 'unpaid');
+      
+      if (pendingSettlements || firebasePendingSettlements.length > 0) {
+        Alert.alert(
+          'Cannot Complete Group',
+          'This group has pending settlements. Please settle all balances before completing the group.',
+          [{ text: 'OK', style: 'default' }]
+        );
+        return;
+      }
+      
+      Alert.alert(
+        'Complete Group',
+        'Are you sure you want to complete this group? Once completed, no new expenses can be added, but you can still view the history.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Complete',
+            style: 'default',
+            onPress: async () => {
+              try {
+                setLoading(true);
+                const { firebaseService } = await import('../services/firebaseService');
+                await firebaseService.completeGroup(currentGroup.id, currentUserId || undefined);
+                Alert.alert(
+                  'Group Completed',
+                  'The group has been completed successfully. You can view its history from the "See All Groups" section.',
+                  [
+                    {
+                      text: 'OK',
+                      onPress: () => navigation.goBack(),
+                    }
+                  ]
+                );
+              } catch (error) {
+                Alert.alert('Error', 'Failed to complete group. Please try again.');
+              } finally {
+                setLoading(false);
+              }
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      Alert.alert('Error', 'Failed to check group status. Please try again.');
+    }
+  }, [balances, groupMembers, firebaseSettlements, currentGroup.id, navigation]);
+
+  // Settlement Actions
+  const handleSettlePayment = useCallback(async (settlement: any) => {
+    Alert.alert(
+      'Settle Payment',
+      `Mark payment of ₹${settlement.amount.toFixed(0)} to ${settlement.to} as paid?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark as Paid',
+          onPress: async () => {
+            try {
+              setSettlementLoading(true);
+              const { firebaseService } = await import('../services/firebaseService');
+              
+              const timestamp = new Date().toISOString();
+              await firebaseService.createSettlement({
+                groupId: currentGroup.id,
+                fromUserId: settlement.fromUserId,
+                fromUserName: settlement.from.replace(' (You)', ''),
+                toUserId: settlement.toUserId,
+                toUserName: settlement.to.replace(' (You)', ''),
+                amount: settlement.amount,
+                status: 'pending' as const,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                paidAt: timestamp,
+              });
+              
+              // Reload settlements
+              const updatedSettlements = await firebaseService.getGroupSettlements(currentGroup.id);
+              setFirebaseSettlements(updatedSettlements);
+              
+              Alert.alert('Success', 'Payment marked as pending. Waiting for confirmation from receiver.');
+            } catch (error) {
+              Alert.alert('Error', 'Failed to mark payment. Please try again.');
+            } finally {
+              setSettlementLoading(false);
+            }
+          }
+        }
+      ]
+    );
+  }, [currentGroup.id]);
+
+  const handleConfirmPayment = useCallback(async (settlement: Settlement) => {
+    Alert.alert(
+      'Confirm Payment',
+      `Confirm that you received ₹${settlement.amount.toFixed(0)} from ${settlement.fromUserName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm Received',
+          onPress: async () => {
+            if (!settlement.id) {
+              Alert.alert('Error', 'Settlement ID not found');
+              return;
+            }
+            
+            try {
+              setSettlementLoading(true);
+              const { firebaseService } = await import('../services/firebaseService');
+              
+              await firebaseService.confirmSettlement(currentGroup.id, settlement.id);
+              
+              // Reload settlements
+              const updatedSettlements = await firebaseService.getGroupSettlements(currentGroup.id);
+              setFirebaseSettlements(updatedSettlements);
+              
+              Alert.alert('Success', 'Payment confirmed!');
+            } catch (error) {
+              Alert.alert('Error', 'Failed to confirm payment. Please try again.');
+            } finally {
+              setSettlementLoading(false);
+            }
+          }
+        }
+      ]
+    );
+  }, [currentGroup.id]); // No dependencies
   const handleCompleteGroup = useCallback(async () => {
     try {
       // Check if there are any pending settlements
@@ -594,6 +797,175 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     
     return settlements;
   }, [currentUserId]);
+  const handleLeaveGroup = useCallback(async () => {
+    try {
+      // Check if the current user has any pending settlements
+      const userPendingSettlements = settlements.filter(settlement => 
+        settlement.fromUserId === currentUserId || settlement.toUserId === currentUserId
+      );
+      
+      // Also check Firebase settlements for pending status involving the current user
+      const userFirebasePendingSettlements = firebaseSettlements.filter(settlement => 
+        (settlement.fromUserId === currentUserId || settlement.toUserId === currentUserId) &&
+        (settlement.status === 'pending' || settlement.status === 'unpaid')
+      );
+      
+      // Check if user has any outstanding balance
+      const userBalance = balances[currentUserId || ''];
+      const hasOutstandingBalance = userBalance && Math.abs(userBalance.net) > 0.01;
+      
+      if (userPendingSettlements.length > 0 || userFirebasePendingSettlements.length > 0 || hasOutstandingBalance) {
+        Alert.alert(
+          'Cannot Leave Group',
+          'You have pending settlements or outstanding balances in this group. Please settle all your dues before leaving the group.',
+          [{ text: 'OK', style: 'default' }]
+        );
+        return;
+      }
+      
+      // If no pending settlements, show confirmation dialog
+      Alert.alert(
+        'Leave Group',
+        'Are you sure you want to leave this group? You will no longer have access to group expenses and will need to be re-added to participate again.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Leave',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                setLoading(true);
+                const { firebaseService } = await import('../services/firebaseService');
+                await firebaseService.removeGroupMember(currentGroup.id, currentUserId || '');
+                Alert.alert(
+                  'Left Group',
+                  'You have successfully left the group.',
+                  [
+                    {
+                      text: 'OK',
+                      onPress: () => navigation.goBack(),
+                    }
+                  ]
+                );
+              } catch (error) {
+                Alert.alert('Error', 'Failed to leave group. Please try again.');
+              } finally {
+                setLoading(false);
+              }
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      Alert.alert('Error', 'Failed to check settlement status. Please try again.');
+    }
+  }, [settlements, firebaseSettlements, balances, currentUserId, currentGroup.id, navigation]);
+
+  // Helper function to calculate balances from expenses
+  const calculateBalancesFromExpenses = useCallback((expenses: any[], members: any[], paidSettlements: Settlement[] = []) => {
+    const balances: Record<string, {net: number}> = {};
+    
+    // Initialize balances for all members
+    members.forEach(member => {
+      balances[member.userId] = { net: 0 };
+    });
+
+    // Process each expense
+    expenses.forEach(expense => {
+      const payerId = expense.paidBy.id;
+      
+      expense.participants.forEach((participant: any) => {
+        const participantId = participant.id || participant.userId;
+        if (participantId !== payerId) {
+          // Participant owes payer
+          if (balances[participantId]) {
+            balances[participantId].net -= participant.amount;
+          }
+          if (balances[payerId]) {
+            balances[payerId].net += participant.amount;
+          }
+        }
+      });
+    });
+
+    // Subtract paid settlements from balances
+    paidSettlements.forEach(settlement => {
+      if (settlement.status === 'paid') {
+        const fromUserId = settlement.fromUserId;
+        const toUserId = settlement.toUserId;
+        const amount = settlement.amount;
+        
+        // Reduce debt for payer and credit for receiver
+        if (balances[fromUserId]) {
+          balances[fromUserId].net += amount; // Reduce debt (move towards positive)
+        }
+        if (balances[toUserId]) {
+          balances[toUserId].net -= amount; // Reduce credit (move towards zero)
+        }
+      }
+    });
+
+    return balances;
+  }, []);
+
+  // Helper function to calculate optimal settlements
+  const calculateOptimalSettlements = useCallback((balances: Record<string, {net: number}>, members: any[]) => {
+    const settlements: any[] = [];
+    
+    // Create arrays of creditors and debtors
+    const creditors = Object.entries(balances)
+      .filter(([, balance]) => balance.net > 0)
+      .map(([userId, balance]) => {
+        const member = members.find(m => m.userId === userId);
+        return { 
+          userId, 
+          name: member?.name || 'Unknown',
+          amount: balance.net 
+        };
+      })
+      .sort((a, b) => b.amount - a.amount);
+
+    const debtors = Object.entries(balances)
+      .filter(([, balance]) => balance.net < 0)
+      .map(([userId, balance]) => {
+        const member = members.find(m => m.userId === userId);
+        return { 
+          userId, 
+          name: member?.name || 'Unknown',
+          amount: Math.abs(balance.net) 
+        };
+      })
+      .sort((a, b) => b.amount - a.amount);
+
+    // Greedy algorithm to minimize transactions
+    let i = 0, j = 0;
+    
+    while (i < creditors.length && j < debtors.length) {
+      const creditor = creditors[i];
+      const debtor = debtors[j];
+      
+      const settleAmount = Math.min(creditor.amount, debtor.amount);
+      
+      if (settleAmount > 0.01) {
+        settlements.push({
+          id: `${debtor.userId}-${creditor.userId}`,
+          fromUserId: debtor.userId,
+          toUserId: creditor.userId,
+          from: debtor.name + (debtor.userId === currentUserId ? ' (You)' : ''),
+          to: creditor.name + (creditor.userId === currentUserId ? ' (You)' : ''),
+          amount: settleAmount
+        });
+      }
+      
+      creditor.amount -= settleAmount;
+      debtor.amount -= settleAmount;
+      
+      if (creditor.amount < 0.01) i++;
+      if (debtor.amount < 0.01) j++;
+    }
+    
+    return settlements;
+  }, [currentUserId]);
 
   const categoryMapping: Record<number | string, {emoji: string; color: string}> = {
     1: {emoji: '🍽️', color: '#FEF3C7'},
@@ -716,10 +1088,73 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     return { status: 'settled', label: 'Settled', color: colors.success || '#10B981' };
   }, [currentUserId, colors, firebaseSettlements, balances]);
 
+  // Helper function to calculate expense payment status based on settlement status
+  const getExpensePaymentStatus = useCallback((expense: any) => {
+    if (!currentUserId) {
+      return { status: 'unknown', label: '', color: colors.secondaryText };
+    }
+
+    const isPaidByUser = expense.paidBy === currentUserId;
+    const userParticipant = expense.participants?.find((p: any) => 
+      (p.userId === currentUserId || p.id === currentUserId)
+    );
+    
+    if (!userParticipant) {
+      return { status: 'not_involved', label: '', color: colors.secondaryText };
+    }
+
+    const userShare = userParticipant.amount || 0;
+    const expenseTotal = expense.amount || 0;
+
+    // Check settlement status for this expense-related payment
+    if (isPaidByUser) {
+      // User paid the expense
+      if (userShare === expenseTotal) {
+        // Only user's expense
+        return { status: 'self_paid', label: 'You Paid', color: colors.secondaryText };
+      } else {
+        // Others owe user money - check if they've settled
+        // Check if there are any unpaid amounts owed to user
+        const userBalance = balances[currentUserId]?.net || 0;
+        
+        if (userBalance > 0) {
+          // Still owed money
+          return { status: 'to_receive', label: 'To Receive', color: colors.primaryButton };
+        } else {
+          // Received or settled
+          return { status: 'received', label: 'Received', color: colors.success || '#10B981' };
+        }
+      }
+    } else {
+      // Someone else paid the expense - user owes money
+      if (userShare > 0) {
+        // Check if user has settled this with the payer
+        const settlementWithPayer = firebaseSettlements.find(settlement => 
+          settlement.fromUserId === currentUserId && 
+          settlement.toUserId === expense.paidBy
+        );
+        
+        if (!settlementWithPayer) {
+          // No settlement record - unpaid
+          return { status: 'unpaid', label: 'Unpaid', color: colors.error || '#EF4444' };
+        } else if (settlementWithPayer.status === 'pending') {
+          // Settlement initiated but not confirmed
+          return { status: 'pending', label: 'Pending', color: colors.warning || '#FFA500' };
+        } else if (settlementWithPayer.status === 'paid') {
+          // Fully paid
+          return { status: 'paid', label: 'Paid', color: colors.success || '#10B981' };
+        }
+      }
+    }
+
+    return { status: 'settled', label: 'Settled', color: colors.success || '#10B981' };
+  }, [currentUserId, colors, firebaseSettlements, balances]);
+
   // --- RENDER FUNCTIONS ---
   
   const renderExpenses = () => {
     if (loading) {
+      return <ExpensesSkeleton />;
       return <ExpensesSkeleton />;
     }
 
@@ -759,8 +1194,51 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
       return dateB.getTime() - dateA.getTime();
     });
 
+    // Group expenses by date
+    const groupedExpenses: Record<string, Expense[]> = {};
+    expenses.forEach((expense: Expense) => {
+      const expenseDate = expense.date || expense.createdAt;
+      const dateObj = expenseDate?.toDate ? expenseDate.toDate() : new Date(expenseDate);
+      const dateKey = dateObj.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric'
+      });
+
+      if (!groupedExpenses[dateKey]) {
+        groupedExpenses[dateKey] = [];
+      }
+      groupedExpenses[dateKey].push(expense);
+    });
+
+    // Get sorted date keys (most recent first)
+    const sortedDateKeys = Object.keys(groupedExpenses).sort((a, b) => {
+      const dateA = new Date(a);
+      const dateB = new Date(b);
+      return dateB.getTime() - dateA.getTime();
+    });
+
     return (
       <>
+        {sortedDateKeys.map((dateKey) => (
+          <View key={dateKey}>
+            {/* Date Header */}
+            <View style={styles.dateHeader}>
+              <Text style={styles.dateHeaderText}>{dateKey}</Text>
+              <View style={styles.dateHeaderLine} />
+            </View>
+
+            {/* Expenses for this date */}
+            {groupedExpenses[dateKey].map((expense: Expense) => {
+              const category =
+                categoryMapping[expense.category?.id] || categoryMapping.default;
+              const yourShare =
+                expense.participants?.find((p: any) =>
+                  (p.userId === currentUserId || p.id === currentUserId)
+                )?.amount || 0;
+
+              // Get payment status for this expense
+              const paymentStatus = getExpensePaymentStatus(expense);
         {sortedDateKeys.map((dateKey) => (
           <View key={dateKey}>
             {/* Date Header */}
@@ -842,6 +1320,7 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
 
     if (loading) {
       return <BalancesSkeleton />;
+      return <BalancesSkeleton />;
     }
 
     if (!balanceList.length) {
@@ -867,6 +1346,24 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                 style={styles.balanceHeader}
                 onPress={() => toggleUserExpansion(item.userId)}
                 disabled={breakdown.length === 0}>
+                {(() => {
+                  const imageUri = ensureDataUri(item.member.avatar);
+                  return imageUri ? (
+                    <Image 
+                      source={{uri: imageUri}} 
+                      style={styles.balanceAvatar}
+                      onError={() => {
+                        // Process member avatar
+                      }}
+                    />
+                  ) : (
+                    <View style={styles.balanceAvatarPlaceholder}>
+                      <Text style={styles.balanceAvatarText}>
+                        {item.member.name?.charAt(0).toUpperCase() || 'U'}
+                      </Text>
+                    </View>
+                  );
+                })()}
                 {(() => {
                   const imageUri = ensureDataUri(item.member.avatar);
                   return imageUri ? (
@@ -935,6 +1432,24 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                           </View>
                         );
                       })()}
+                      {(() => {
+                        const imageUri = ensureDataUri(b.avatar);
+                        return imageUri ? (
+                          <Image 
+                            source={{uri: imageUri}} 
+                            style={styles.breakdownAvatar}
+                            onError={() => {
+                              // Process breakdown avatar
+                            }}
+                          />
+                        ) : (
+                          <View style={styles.breakdownAvatarPlaceholder}>
+                            <Text style={styles.breakdownAvatarText}>
+                              {(b.fromUser || b.toUser || 'U').charAt(0).toUpperCase()}
+                            </Text>
+                          </View>
+                        );
+                      })()}
                       <Text style={styles.breakdownText} numberOfLines={2}>{b.text}</Text>
                     </View>
                   ))}
@@ -949,16 +1464,20 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
 
   const renderSettlement = () => {
     
+    
     if (loading || groupMembers.length === 0) {
+      return <SettlementSkeleton />;
       return <SettlementSkeleton />;
     }
 
+    if (settlements.length === 0) {
     if (settlements.length === 0) {
       return (
         <View style={styles.noDataContainer}>
           <Ionicons name="checkmark-circle" size={scale(48)} color={colors.success} />
           <Text style={styles.noDataText}>All settled up!</Text>
           <Text style={styles.noDataSubtext}>No pending settlements</Text>
+          <Text style={styles.noDataSubtext}>Add some expenses to see settlements</Text>
           <Text style={styles.noDataSubtext}>Add some expenses to see settlements</Text>
         </View>
       );
@@ -1105,20 +1624,169 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
         )}
       </>
     );
+    // Separate active and completed settlements
+    const activeSettlements = settlements; // These are calculated from current balances
+    const completedSettlements = firebaseSettlements.filter(fs => fs.status === 'paid');
+    
+    return (
+      <>
+        {/* Active Settlements - Need to be paid */}
+        {activeSettlements.length > 0 && (
+          <Text style={styles.sectionHeader}>Pending Settlements</Text>
+        )}
+        {activeSettlements.map((settlement) => {
+          // Check if this settlement has a Firebase tracking record
+          const firebaseSettlement = firebaseSettlements.find(fs => 
+            fs.fromUserId === settlement.fromUserId && 
+            fs.toUserId === settlement.toUserId &&
+            Math.abs(fs.amount - settlement.amount) < 0.01
+          );
+
+          const isCurrentUserPayer = settlement.fromUserId === currentUserId;
+          const isCurrentUserReceiver = settlement.toUserId === currentUserId;
+          
+          
+          return (
+            <View key={settlement.id} style={styles.settlementItem}>
+              <View style={styles.settlementInfo}>
+                <Ionicons 
+                  name="arrow-forward-circle" 
+                  size={scale(24)} 
+                  color={colors.primaryButton} 
+                  style={styles.settlementIcon}
+                />
+                <View style={styles.settlementTextContainer}>
+                  <Text style={styles.settlementText}>
+                    <Text style={styles.settlementName}>{settlement.from}</Text>
+                    {' pays '}
+                    <Text style={styles.settlementName}>{settlement.to}</Text>
+                  </Text>
+                  <Text style={styles.settlementStatus}>
+                    Status: {
+                      !firebaseSettlement ? 'Unpaid' :
+                      firebaseSettlement.status === 'pending' ? 'Pending Confirmation' : 'Paid'
+                    }
+                  </Text>
+                </View>
+              </View>
+              
+              <View style={styles.settlementActions}>
+                <Text style={styles.settlementAmount}>₹{settlement.amount.toFixed(0)}</Text>
+                
+                {/* Show appropriate button based on user role and status */}
+                {!firebaseSettlement && isCurrentUserPayer && (
+                  <TouchableOpacity 
+                    style={styles.settleButton}
+                    onPress={() => handleSettlePayment(settlement)}
+                    disabled={settlementLoading}
+                  >
+                    <Text style={styles.settleButtonText}>
+                      {settlementLoading ? 'Processing...' : 'Settle'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                
+                {firebaseSettlement?.status === 'pending' && isCurrentUserPayer && (
+                  <View style={styles.pendingButton}>
+                    <Text style={styles.pendingButtonText}>Pending</Text>
+                  </View>
+                )}
+                
+                {firebaseSettlement?.status === 'pending' && isCurrentUserReceiver && (
+                  <TouchableOpacity 
+                    style={styles.confirmButton}
+                    onPress={() => handleConfirmPayment(firebaseSettlement)}
+                    disabled={settlementLoading}
+                  >
+                    <Text style={styles.confirmButtonText}>
+                      {settlementLoading ? 'Processing...' : 'Confirm'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                
+                {firebaseSettlement?.status === 'paid' && (
+                  <View style={styles.paidButton}>
+                    <Ionicons name="checkmark-circle" size={scale(16)} color={colors.success} />
+                    <Text style={styles.paidButtonText}>Paid</Text>
+                  </View>
+                )}
+                
+                {/* Show unpaid status for non-current users */}
+                {!isCurrentUserPayer && !isCurrentUserReceiver && !firebaseSettlement && (
+                  <View style={styles.unpaidButton}>
+                    <Text style={styles.unpaidButtonText}>Unpaid</Text>
+                  </View>
+                )}
+                
+                {/* Fallback for edge cases */}
+                {!isCurrentUserPayer && !isCurrentUserReceiver && firebaseSettlement && (
+                  <Text style={styles.noActionText}>-</Text>
+                )}
+              </View>
+            </View>
+          );
+        })}
+        
+        {/* Completed Settlements - Already paid */}
+        {completedSettlements.length > 0 && (
+          <>
+            <Text style={styles.sectionHeader}>Completed Settlements</Text>
+            {completedSettlements.map((settlement) => (
+              <View key={`completed-${settlement.id}`} style={[styles.settlementItem, styles.completedSettlementItem]}>
+                <View style={styles.settlementInfo}>
+                  <Ionicons 
+                    name="checkmark-circle" 
+                    size={scale(24)} 
+                    color={colors.success} 
+                    style={styles.settlementIcon}
+                  />
+                  <View style={styles.settlementTextContainer}>
+                    <Text style={styles.settlementText}>
+                      <Text style={styles.settlementName}>{settlement.fromUserName}</Text>
+                      {' paid '}
+                      <Text style={styles.settlementName}>{settlement.toUserName}</Text>
+                    </Text>
+                    <Text style={styles.settlementStatus}>
+                      Completed on {new Date(settlement.confirmedAt || settlement.updatedAt).toLocaleDateString()}
+                    </Text>
+                  </View>
+                </View>
+                
+                <View style={styles.settlementActions}>
+                  <Text style={styles.settlementAmount}>₹{settlement.amount.toFixed(0)}</Text>
+                  <View style={styles.paidButton}>
+                    <Ionicons name="checkmark-circle" size={scale(16)} color={colors.success} />
+                    <Text style={styles.paidButtonText}>Paid</Text>
+                  </View>
+                </View>
+              </View>
+            ))}
+          </>
+        )}
+      </>
+    );
   };
 
   const renderTabContent = () => {
     switch (activeTab) {
       case 'expenses':
+      case 'expenses':
         return renderExpenses();
       case 'balances':
+      case 'balances':
         return renderBalance();
+      case 'settlement':
       case 'settlement':
         return renderSettlement();
       default:
         return renderExpenses();
     }
   };
+
+  const handleTabPress = useCallback((tabId: TabId) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setActiveTab(tabId);
+  }, []);
 
   const handleTabPress = useCallback((tabId: TabId) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -1165,10 +1833,36 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                 </View>
               );
             })()}
+            {(() => {
+              const imageUri = ensureDataUri(currentGroup?.coverImageBase64);
+              return imageUri ? (
+                <Image source={{uri: imageUri}} style={styles.groupCoverImage} />
+              ) : (
+                <View style={styles.groupAvatarContainer}>
+                  <Text style={styles.groupAvatar}>{currentGroup?.avatar || '🎭'}</Text>
+                </View>
+              );
+            })()}
 
             <View style={styles.membersPreview}>
               {groupMembers.slice(0, 3).map((member, index) => (
                 <View key={member.id || index} style={[styles.memberAvatarContainer, {marginLeft: scale(index * -8)}]}>
+                  {(() => {
+                    const imageUri = ensureDataUri(member.avatar);
+                    return imageUri ? (
+                      <Image 
+                        source={{uri: imageUri}} 
+                        style={styles.memberAvatar}
+                        onError={() => {
+                          // Process member avatar
+                        }}
+                      />
+                    ) : (
+                      <View style={styles.memberAvatarPlaceholder}>
+                        <Text style={styles.memberAvatarText}>{member.name?.charAt(0).toUpperCase() || 'U'}</Text>
+                      </View>
+                    );
+                  })()}
                   {(() => {
                     const imageUri = ensureDataUri(member.avatar);
                     return imageUri ? (
@@ -1191,6 +1885,7 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
           </View>
 
           <Text style={styles.groupName}>{currentGroup?.name}</Text>
+          <Text style={styles.groupName}>{currentGroup?.name}</Text>
         </View>
 
         <View style={styles.summarySection}>
@@ -1209,12 +1904,15 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                 <View>
                   {userBalance.net === 0 ? (
                     <Text style={styles.summaryText}>You are all settled up in {currentGroup?.name}! 🎉</Text>
+                    <Text style={styles.summaryText}>You are all settled up in {currentGroup?.name}! 🎉</Text>
                   ) : userBalance.net > 0 ? (
                     <Text style={styles.summaryText}>
+                      You get back total <Text style={styles.owedAmount}>₹{userBalance.net.toFixed(0)}</Text> in {currentGroup?.name}
                       You get back total <Text style={styles.owedAmount}>₹{userBalance.net.toFixed(0)}</Text> in {currentGroup?.name}
                     </Text>
                   ) : (
                     <Text style={styles.summaryText}>
+                      You owe total <Text style={styles.oweAmount}>₹{Math.abs(userBalance.net).toFixed(0)}</Text> in {currentGroup?.name}
                       You owe total <Text style={styles.oweAmount}>₹{Math.abs(userBalance.net).toFixed(0)}</Text> in {currentGroup?.name}
                     </Text>
                   )}
@@ -1256,10 +1954,28 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                   {tab.label}
                 </Text>
               </View>
+          {TAB_CONFIG.map(tab => (
+            <TouchableOpacity 
+              key={tab.id} 
+              style={[styles.tab, activeTab === tab.id && styles.activeTab]} 
+              onPress={() => handleTabPress(tab.id)}
+            >
+              <View style={styles.tabContent}>
+                <Ionicons 
+                  name={activeTab === tab.id ? tab.activeIcon as any : tab.icon as any} 
+                  size={scale(16)} 
+                  color={activeTab === tab.id ? colors.primaryButton : colors.secondaryText}
+                  style={styles.tabIcon}
+                />
+                <Text style={[styles.tabText, activeTab === tab.id && styles.activeTabText]}>
+                  {tab.label}
+                </Text>
+              </View>
             </TouchableOpacity>
           ))}
         </View>
 
+        <View style={styles.tabContentContainer}>{renderTabContent()}</View>
         <View style={styles.tabContentContainer}>{renderTabContent()}</View>
       </ScrollView>
 
@@ -1319,7 +2035,19 @@ export const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                   <MaterialIcons name="group" size={scale(20)} color={colors.secondaryText} style={styles.optionIconStyle} />
                   <Text style={styles.optionText}>Manage Group</Text>
                 </TouchableOpacity>
+            {isGroupAdmin ? (
+              <>
+                <TouchableOpacity style={styles.optionItem} onPress={() => { setShowGroupOptions(false); handleManageGroup(); }}>
+                  <MaterialIcons name="group" size={scale(20)} color={colors.secondaryText} style={styles.optionIconStyle} />
+                  <Text style={styles.optionText}>Manage Group</Text>
+                </TouchableOpacity>
 
+                <TouchableOpacity style={styles.optionItem} onPress={() => { setShowGroupOptions(false); handleCompleteGroup(); }}>
+                  <MaterialIcons name="check-circle" size={scale(20)} color={colors.success ?? '#10B981'} style={styles.optionIconStyle} />
+                  <Text style={[styles.optionText, styles.completeText]}>Complete Group</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
                 <TouchableOpacity style={styles.optionItem} onPress={() => { setShowGroupOptions(false); handleCompleteGroup(); }}>
                   <MaterialIcons name="check-circle" size={scale(20)} color={colors.success ?? '#10B981'} style={styles.optionIconStyle} />
                   <Text style={[styles.optionText, styles.completeText]}>Complete Group</Text>
@@ -1470,8 +2198,22 @@ const createStyles = (
       backgroundColor: colors.cardBackground,
       borderRadius: scale(8),
       marginBottom: scale(16),
+      backgroundColor: colors.cardBackground,
+      borderRadius: scale(8),
+      marginBottom: scale(16),
     },
     tab: {flex: 1, paddingVertical: scale(12), alignItems: 'center'},
+    activeTab: {
+      backgroundColor: colors.primaryButton + '20',
+      borderRadius: scale(6),
+      margin: scale(2),
+    },
+    tabContent: {
+      alignItems: 'center',
+    },
+    tabIcon: {
+      marginBottom: scale(4),
+    },
     activeTab: {
       backgroundColor: colors.primaryButton + '20',
       borderRadius: scale(6),
@@ -1486,6 +2228,7 @@ const createStyles = (
     tabText: {fontSize: fonts.caption, color: colors.secondaryText},
     activeTabText: {color: colors.primaryButton, fontWeight: '600'},
     scrollContainer: {flex: 1},
+    tabContentContainer: {paddingHorizontal: scale(16), paddingBottom: scale(100)},
     tabContentContainer: {paddingHorizontal: scale(16), paddingBottom: scale(100)},
     expenseItem: {
       flexDirection: 'row',
@@ -1523,8 +2266,46 @@ const createStyles = (
       fontWeight: '600',
       textAlign: 'center',
     },
+    expenseTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: scale(2),
+    },
+    expenseTitle: {fontSize: fonts.body, fontWeight: '500', color: colors.primaryText, flex: 1},
+    statusTag: {
+      paddingHorizontal: scale(8),
+      paddingVertical: scale(2),
+      borderRadius: scale(12),
+      borderWidth: 1,
+      marginLeft: scale(8),
+    },
+    statusTagText: {
+      fontSize: fonts.xs,
+      fontWeight: '600',
+      textAlign: 'center',
+    },
     expenseSubtitle: {fontSize: fonts.xs, color: colors.secondaryText, marginTop: scale(2)},
     expenseDate: {fontSize: fonts.xs, color: colors.secondaryText, marginTop: scale(2)},
+    dateHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: scale(16),
+      marginBottom: scale(8),
+      gap: scale(12),
+    },
+    dateHeaderText: {
+      fontSize: fonts.caption,
+      fontWeight: '600',
+      color: colors.secondaryText,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    dateHeaderLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: colors.background,
+    },
     dateHeader: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -1710,6 +2491,131 @@ const createStyles = (
       borderLeftWidth: scale(3),
       borderLeftColor: colors.success,
     },
+    // Settlement styles
+    settlementItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: scale(16),
+      paddingHorizontal: scale(16),
+      backgroundColor: colors.cardBackground,
+      borderRadius: scale(8),
+      marginVertical: scale(4),
+    },
+    settlementInfo: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flex: 1,
+    },
+    settlementIcon: {
+      marginRight: scale(12),
+    },
+    settlementText: {
+      fontSize: fonts.body,
+      color: colors.primaryText,
+      flex: 1,
+    },
+    settlementName: {
+      fontWeight: '600',
+    },
+    settlementAmount: {
+      fontSize: fonts.lg,
+      fontWeight: '600',
+      color: colors.primaryButton,
+      marginBottom: scale(4),
+    },
+    settlementTextContainer: {
+      flex: 1,
+    },
+    settlementStatus: {
+      fontSize: fonts.caption,
+      color: colors.secondaryText,
+      marginTop: scale(2),
+    },
+    settlementActions: {
+      alignItems: 'flex-end',
+    },
+    settleButton: {
+      backgroundColor: colors.primaryButton,
+      paddingHorizontal: scale(16),
+      paddingVertical: scale(6),
+      borderRadius: scale(6),
+      marginTop: scale(4),
+    },
+    settleButtonText: {
+      color: colors.primaryButtonText,
+      fontSize: fonts.caption,
+      fontWeight: '600',
+    },
+    pendingButton: {
+      backgroundColor: colors.warning || '#FFA500',
+      paddingHorizontal: scale(16),
+      paddingVertical: scale(6),
+      borderRadius: scale(6),
+      marginTop: scale(4),
+    },
+    pendingButtonText: {
+      color: colors.primaryButtonText,
+      fontSize: fonts.caption,
+      fontWeight: '600',
+    },
+    confirmButton: {
+      backgroundColor: colors.success || '#10B981',
+      paddingHorizontal: scale(16),
+      paddingVertical: scale(6),
+      borderRadius: scale(6),
+      marginTop: scale(4),
+    },
+    confirmButtonText: {
+      color: colors.primaryButtonText,
+      fontSize: fonts.caption,
+      fontWeight: '600',
+    },
+    paidButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.success || '#10B981',
+      paddingHorizontal: scale(12),
+      paddingVertical: scale(6),
+      borderRadius: scale(6),
+      marginTop: scale(4),
+    },
+    paidButtonText: {
+      color: colors.primaryButtonText,
+      fontSize: fonts.caption,
+      fontWeight: '600',
+      marginLeft: scale(4),
+    },
+    unpaidButton: {
+      backgroundColor: colors.error || '#EF4444',
+      paddingHorizontal: scale(12),
+      paddingVertical: scale(6),
+      borderRadius: scale(6),
+      marginTop: scale(4),
+    },
+    unpaidButtonText: {
+      color: colors.primaryButtonText,
+      fontSize: fonts.caption,
+      fontWeight: '600',
+    },
+    noActionText: {
+      fontSize: fonts.caption,
+      color: colors.secondaryText,
+      fontStyle: 'italic',
+    },
+    sectionHeader: {
+      fontSize: fonts.lg,
+      fontWeight: '600',
+      color: colors.primaryText,
+      marginTop: scale(20),
+      marginBottom: scale(12),
+      paddingHorizontal: scale(16),
+    },
+    completedSettlementItem: {
+      opacity: 0.7,
+      borderLeftWidth: scale(3),
+      borderLeftColor: colors.success,
+    },
     
     floatingButton: {
       position: 'absolute',
@@ -1756,6 +2662,7 @@ const createStyles = (
     optionText: {fontSize: fonts.body, color: colors.primaryText},
     leaveText: {color: colors.error ?? '#EF4444'},
     deleteText: {color: colors.error ?? '#EF4444', fontWeight: '600'},
+    completeText: {color: colors.success ?? '#10B981', fontWeight: '600'},
     completeText: {color: colors.success ?? '#10B981', fontWeight: '600'},
     cancelButtonContainer: {
       borderTopWidth: 1,
